@@ -11,10 +11,10 @@ on:
       bftpd_version:
         description: 'bftpd version to build'
         required: false
-        default: '5.4'
+        default: '6.6'
 
 env:
-  BFTPD_VERSION: ${{ github.event.inputs.bftpd_version || '5.4' }}
+  BFTPD_VERSION: ${{ github.event.inputs.bftpd_version }}
   NDK_VERSION: 'r26d'
 
 jobs:

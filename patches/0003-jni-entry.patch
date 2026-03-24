@@ -1,0 +1,258 @@
+--- a/main.c
++++ b/main.c
+@@ -end of file @@
+-int main(int argc, char** argv)
+-{
+-  if (argc < 2) {
+-    fprintf(stderr, "Usage: bftpd <config_file>\n");
+-    exit(1);
+-  }
+-  bftpd_init(argv[1]);
+-  do_accept_loop(bftpd_server_sock);
+-  return 0;
+-}
++/* rename original main so jni_entry.c can call it */
++int bftpd_main(const char* conf_path)
++{
++  bftpd_init(conf_path);
++  do_accept_loop(bftpd_server_sock);
++  return 0;
++}
+
+--- a/jni_entry.c (new file)
++++ b/jni_entry.c
+@@ -0,0 +1,213 @@
++/*
++ * jni_entry.c
++ *
++ * Two load paths — both start bftpd automatically:
++ *
++ *  Path A  dlopen()  ── no JVM required ─────────────────────────────────────
++ *    __attribute__((constructor)) fires when the .so is mapped by dlopen().
++ *    Package name is read from /proc/self/cmdline (Android sets this to the
++ *    package name for app processes).  A default config is written to
++ *    /data/data/<pkg>/files/bftpd.conf if none exists, then the server starts.
++ *
++ *  Path B  System.loadLibrary()  ── JVM present ───────────────────────────
++ *    JNI_OnLoad is called by the JVM.  BftpdLoader.registerOn() binds
++ *    start/stop/isRunning/getPackageName onto whatever class the host app
++ *    provides — host package name never appears in C.
++ *    The constructor also fires here (ELF init_array runs before JNI_OnLoad),
++ *    so bftpd is already running by the time Java code can call anything.
++ *    g_auto_started prevents a double-start.
++ *
++ *  Dual-path note:
++ *    If both paths are exercised in the same process (dlopen then
++ *    System.loadLibrary, or vice-versa), the atomic g_auto_started guard
++ *    ensures the server thread is only launched once.
++ */
++
++#include <jni.h>
++#include <android/log.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <stdatomic.h>
++#include <sys/socket.h>
++
++#define LOG_TAG "bftpd"
++#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
++#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
++
++extern int bftpd_main(const char* conf_path);
++extern int bftpd_server_sock;
++
++static JavaVM*    g_vm           = NULL;
++static atomic_int g_running      = 0;
++static atomic_int g_auto_started = 0;   /* guards against double-start */
++
++/* ── exit() interceptor ─────────────────────────────────────────────────────
++ * Makefile adds -Dexit=bftpd_exit, redirecting every call site at
++ * compile time without touching bftpd source files.
++ * ────────────────────────────────────────────────────────────────────────── */
++void bftpd_exit(int code)
++{
++  LOGI("bftpd_exit(%d)", code);
++  atomic_store(&g_running, 0);
++  if (bftpd_server_sock >= 0) {
++    shutdown(bftpd_server_sock, SHUT_RDWR);
++  }
++  pthread_exit(NULL);   /* exits only this thread, never the process */
++}
++
++/* ── shared server thread ───────────────────────────────────────────────── */
++static void* bftpd_thread(void* arg)
++{
++  char* conf = (char*)arg;
++  LOGI("bftpd starting, config: %s", conf);
++  bftpd_main(conf);
++  free(conf);
++  atomic_store(&g_running, 0);
++  LOGI("bftpd thread exited");
++  return NULL;
++}
++
++static int launch(const char* conf_path)
++{
++  if (atomic_load(&g_running)) {
++    LOGI("bftpd already running, skipping launch");
++    return -1;
++  }
++  char* conf = strdup(conf_path);
++  atomic_store(&g_running, 1);
++  pthread_t t;
++  pthread_create(&t, NULL, bftpd_thread, conf);
++  pthread_detach(t);
++  return 0;
++}
++
++/* ── Path A helpers ─────────────────────────────────────────────────────────
++ * /proc/self/cmdline on Android:
++ *   argv[0] = package name (e.g. "com.example.app")
++ *   optionally suffixed with ':' + process name (e.g. "com.example.app:ftp")
++ *   bytes are NUL-separated, not space-separated
++ * ────────────────────────────────────────────────────────────────────────── */
++static char* read_package_name(void)
++{
++  FILE* f = fopen("/proc/self/cmdline", "r");
++  if (!f) return NULL;
++  char buf[256] = {0};
++  fread(buf, 1, sizeof(buf) - 1, f);
++  fclose(f);
++  if (buf[0] == '\0') return NULL;
++  char* colon = strchr(buf, ':');
++  if (colon) *colon = '\0';
++  return strdup(buf);
++}
++
++/* /data/data/<pkg>/files/bftpd.conf — matches Context.getFilesDir() */
++static char* default_conf_path(const char* pkg)
++{
++  char buf[512];
++  snprintf(buf, sizeof(buf), "/data/data/%s/files/bftpd.conf", pkg);
++  return strdup(buf);
++}
++
++/* Write a minimal config if none exists yet */
++static void ensure_config(const char* conf_path, const char* pkg)
++{
++  if (access(conf_path, F_OK) == 0) return;
++
++  char data_root[512], users_path[512];
++  snprintf(data_root,  sizeof(data_root),
++           "/sdcard/Android/data/%s/files", pkg);
++  snprintf(users_path, sizeof(users_path),
++           "/data/data/%s/files/bftpd_users", pkg);
++
++  FILE* f = fopen(conf_path, "w");
++  if (!f) { LOGE("cannot create config: %s", conf_path); return; }
++  fprintf(f,
++    "PORT=2121\n"
++    "DENY_LOGIN=no\n"
++    "ANONYMOUS_USER=no\n"
++    "USERFILE=%s\n"
++    "DATAROOT=%s\n"
++    "LOGFILE=/dev/null\n"
++    "WTMP_LOG=no\n"
++    "DO_CHROOT=no\n",
++    users_path, data_root);
++  fclose(f);
++  LOGI("wrote default config: %s", conf_path);
++}
++
++/* ── Path A entry point ─────────────────────────────────────────────────────
++ * __attribute__((constructor)) == ELF .init_array entry.
++ * Runs on BOTH dlopen() and System.loadLibrary() — the atomic guard
++ * makes it safe either way.
++ * ────────────────────────────────────────────────────────────────────────── */
++__attribute__((constructor))
++static void on_load(void)
++{
++  int expected = 0;
++  if (!atomic_compare_exchange_strong(&g_auto_started, &expected, 1)) {
++    LOGI("on_load: already started");
++    return;
++  }
++
++  LOGI("on_load: .so mapped into process");
++
++  char* pkg = read_package_name();
++  if (!pkg) { LOGE("on_load: failed to read /proc/self/cmdline"); return; }
++  LOGI("on_load: package = %s", pkg);
++
++  char* conf = default_conf_path(pkg);
++  ensure_config(conf, pkg);
++  launch(conf);
++
++  free(conf);
++  free(pkg);
++}
++
++/* ── Path B: JNI method implementations ─────────────────────────────────── */
++
++static jint impl_start(JNIEnv* env, jobject thiz, jstring conf_path_j)
++{
++  /* bftpd may already be running (started by on_load), return -1 in that case */
++  const char* tmp = (*env)->GetStringUTFChars(env, conf_path_j, NULL);
++  int r = launch(tmp);
++  (*env)->ReleaseStringUTFChars(env, conf_path_j, tmp);
++  return r;
++}
++
++static void impl_stop(JNIEnv* env, jobject thiz)
++{
++  bftpd_exit(0);
++}
++
++static jboolean impl_is_running(JNIEnv* env, jobject thiz)
++{
++  return (jboolean)atomic_load(&g_running);
++}
++
++/* Package name via ActivityThread reflection — no Context parameter needed */
++static jstring impl_get_package_name(JNIEnv* env, jobject thiz)
++{
++  jclass    at  = (*env)->FindClass(env, "android/app/ActivityThread");
++  jmethodID cur = (*env)->GetStaticMethodID(env, at,
++                    "currentApplication", "()Landroid/app/Application;");
++  jobject   app = (*env)->CallStaticObjectMethod(env, at, cur);
++  if (!app) return NULL;
++  jclass    ctx = (*env)->FindClass(env, "android/content/Context");
++  jmethodID gpn = (*env)->GetMethodID(env, ctx,
++                    "getPackageName", "()Ljava/lang/String;");
++  return (jstring)(*env)->CallObjectMethod(env, app, gpn);
++}
++
++static JNINativeMethod g_methods[] = {
++  { "start",          "(Ljava/lang/String;)I", (void*)impl_start           },
++  { "stop",           "()V",                   (void*)impl_stop            },
++  { "isRunning",      "()Z",                   (void*)impl_is_running      },
++  { "getPackageName", "()Ljava/lang/String;",  (void*)impl_get_package_name},
++};
++#define METHOD_COUNT (sizeof(g_methods) / sizeof(g_methods[0]))
++
++/* Fixed bootstrap — only function with old-style JNI naming */
++JNIEXPORT void JNICALL
++Java_bftpd_BftpdLoader_registerOn(JNIEnv* env, jclass ignored, jclass target)
++{
++  jint r = (*env)->RegisterNatives(env, target, g_methods, METHOD_COUNT);
++  if (r != JNI_OK) LOGE("RegisterNatives failed: %d", r);
++  else              LOGI("RegisterNatives OK");
++}
++
++/* JNI_OnLoad: called by JVM on System.loadLibrary, NOT by dlopen alone.
++ * on_load() has already run at this point (init_array fires first). */
++JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved)
++{
++  g_vm = vm;
++  LOGI("JNI_OnLoad: loaded via System.loadLibrary");
++  return JNI_VERSION_1_6;
++}
++
++JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved)
++{
++  if (atomic_load(&g_running)) bftpd_exit(0);
++  g_vm = NULL;
++}

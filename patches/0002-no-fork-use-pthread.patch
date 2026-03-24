@@ -1,0 +1,62 @@
+--- a/main.c
++++ b/main.c
+@@ -1,6 +1,8 @@
+ #include "main.h"
+ #include "sockets.h"
+ #include "login.h"
++#include <pthread.h>
++#include <stdlib.h>
+ 
++/* Android: fork() is unsafe inside app process, use pthread instead */
++
++typedef struct {
++  int sock;
++} ClientArgs;
++
++static void* client_thread(void* arg)
++{
++  ClientArgs* a = (ClientArgs*)arg;
++  int sock = a->sock;
++  free(a);
++  bftpd_login(sock);   /* original per-child entry point */
++  return NULL;
++}
++
+ void do_accept_loop(int server_sock)
+ {
+   for (;;) {
+     struct sockaddr_storage addr;
+     socklen_t addrlen = sizeof(addr);
+     int client_sock = accept(server_sock, (struct sockaddr*)&addr, &addrlen);
+     if (client_sock < 0) continue;
+ 
+-    pid_t pid = fork();
+-    if (pid < 0) {
+-      close(client_sock);
+-      continue;
+-    }
+-    if (pid == 0) {
+-      /* child process */
+-      close(server_sock);
+-      bftpd_login(client_sock);
+-      exit(0);        /* kills entire app process if used as .so! */
+-    } else {
+-      /* parent */
+-      close(client_sock);
+-      waitpid(-1, NULL, WNOHANG);
+-    }
++    ClientArgs* args = malloc(sizeof(ClientArgs));
++    if (!args) { close(client_sock); continue; }
++    args->sock = client_sock;
++
++    pthread_t t;
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++    if (pthread_create(&t, &attr, client_thread, args) != 0) {
++      free(args);
++      close(client_sock);
++    }
++    pthread_attr_destroy(&attr);
+   }
+ }

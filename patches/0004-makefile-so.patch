@@ -1,0 +1,47 @@
+--- a/Makefile
++++ b/Makefile
+@@ -1,18 +1,28 @@
+-CC     = gcc
+-CFLAGS = -O2 -Wall -Wextra -pedantic
+-LIBS   = -lpam -lcap
+-TARGET = bftpd
++# ── Android cross-compile overrides ────────────────────────────────────
++# Set CROSS_CC to the NDK clang before invoking make, e.g.:
++#   CROSS_CC=aarch64-linux-android21-clang make
++CC     ?= $(CROSS_CC)
++
++CFLAGS  = -O2 -Wall -Wextra \
++          -fPIC \
++          -DANDROID -D__ANDROID__ \
++          -Dexit=bftpd_exit \
++          -DVS_NO_PAM \
++          -DVS_NO_CAPABILITIES
++
++LDFLAGS = -shared -Wl,-soname,libbftpd.so
++
++# -llog  : Android logging (liblog)
++# -ldl   : dlopen (may be needed by bftpd internals)
++LIBS    = -llog -ldl -lpthread
++
++TARGET  = libbftpd.so
+ 
+ OBJS = main.o \
+        login.o \
+        sockets.o \
+        commands.o \
+        sysdeputil.o \
+        sysutil.o \
+-       db.o
++       db.o \
++       jni_entry.o
+ 
+ $(TARGET): $(OBJS)
+-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
++	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+ 
+ %.o: %.c
+ 	$(CC) $(CFLAGS) -c -o $@ $<
+ 
+ clean:
+-	rm -f $(OBJS) $(TARGET)
++	rm -f $(OBJS) $(TARGET) jni_entry.o

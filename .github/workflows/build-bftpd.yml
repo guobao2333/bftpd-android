@@ -1,0 +1,162 @@
+name: Build libbftpd.so for Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'patches/**'
+      - '.github/workflows/build-bftpd.yml'
+  workflow_dispatch:
+    inputs:
+      bftpd_version:
+        description: 'bftpd version to build'
+        required: false
+        default: '5.4'
+
+env:
+  BFTPD_VERSION: ${{ github.event.inputs.bftpd_version || '5.4' }}
+  NDK_VERSION: 'r26d'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi:
+          - name: arm64-v8a
+            triple: aarch64-linux-android
+            api: 21
+          - name: armeabi-v7a
+            triple: armv7a-linux-androideabi
+            api: 19
+          - name: x86_64
+            triple: x86_64-linux-android
+            api: 21
+          - name: x86
+            triple: i686-linux-android
+            api: 19
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── NDK ─────────────────────────────────────────────────────────────
+      - name: Cache NDK
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: android-ndk-${{ env.NDK_VERSION }}
+          key: ndk-${{ env.NDK_VERSION }}
+
+      - name: Download NDK
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          wget -q \
+            https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+          rm android-ndk-${{ env.NDK_VERSION }}-linux.zip
+
+      - name: Set NDK env
+        run: |
+          echo "TOOLCHAIN=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64" \
+            >> $GITHUB_ENV
+
+      # ── bftpd source ─────────────────────────────────────────────────────
+      - name: Cache bftpd source
+        id: cache-src
+        uses: actions/cache@v4
+        with:
+          path: bftpd-${{ env.BFTPD_VERSION }}
+          key: bftpd-src-${{ env.BFTPD_VERSION }}
+
+      - name: Download bftpd source
+        if: steps.cache-src.outputs.cache-hit != 'true'
+        run: |
+          wget -q \
+            https://sourceforge.net/projects/bftpd/files/bftpd/${{ env.BFTPD_VERSION }}/bftpd-${{ env.BFTPD_VERSION }}.tar.gz
+          tar xzf bftpd-${{ env.BFTPD_VERSION }}.tar.gz
+          rm  bftpd-${{ env.BFTPD_VERSION }}.tar.gz
+
+      # ── patch ────────────────────────────────────────────────────────────
+      - name: Apply patches
+        run: |
+          # Work on a fresh copy for each matrix job
+          cp -r bftpd-${{ env.BFTPD_VERSION }} build-${{ matrix.abi.name }}
+          cd build-${{ matrix.abi.name }}
+          for p in $(ls $GITHUB_WORKSPACE/patches/*.patch | sort); do
+            echo ">>> Applying: $(basename $p)"
+            patch -p1 < "$p"
+          done
+
+      # ── build ────────────────────────────────────────────────────────────
+      - name: Build ${{ matrix.abi.name }}
+        run: |
+          TRIPLE=${{ matrix.abi.triple }}
+          API=${{ matrix.abi.api }}
+          CC=${{ env.TOOLCHAIN }}/bin/${TRIPLE}${API}-clang
+          STRIP=${{ env.TOOLCHAIN }}/bin/llvm-strip
+
+          cd build-${{ matrix.abi.name }}
+          make clean
+          CROSS_CC=$CC make -j$(nproc)
+
+          # Verify it's a shared lib
+          file libbftpd.so | grep -q "shared object" \
+            || { echo "ERROR: libbftpd.so is not a shared object"; exit 1; }
+
+          # Strip debug symbols
+          $STRIP --strip-unneeded libbftpd.so
+
+          echo "--- Binary info ---"
+          file libbftpd.so
+          ls -lh libbftpd.so
+
+          # Stage output
+          mkdir -p $GITHUB_WORKSPACE/out/${{ matrix.abi.name }}
+          cp libbftpd.so $GITHUB_WORKSPACE/out/${{ matrix.abi.name }}/
+
+      # ── upload artifact ──────────────────────────────────────────────────
+      - name: Upload ${{ matrix.abi.name }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: libbftpd-${{ matrix.abi.name }}
+          path: out/${{ matrix.abi.name }}/libbftpd.so
+          if-no-files-found: error
+
+  # ── collect all ABIs and publish release ──────────────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries/
+          # downloads to binaries/libbftpd-<abi>/libbftpd.so
+
+      - name: Rename for release
+        run: |
+          mkdir release
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            src="binaries/libbftpd-${abi}/libbftpd.so"
+            if [ -f "$src" ]; then
+              cp "$src" "release/libbftpd-${abi}.so"
+            fi
+          done
+          ls -lh release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bftpd-${{ env.BFTPD_VERSION }}-${{ github.sha }}
+          name: libbftpd.so ${{ env.BFTPD_VERSION }} (${{ github.sha }})
+          body: |
+            Automatically built from bftpd ${{ env.BFTPD_VERSION }} with Android JNI patches.
+
+            ## Usage
+            Put each `.so` into the corresponding `app/src/main/jniLibs/<abi>/libbftpd.so`
+            then call `System.loadLibrary("bftpd")` from your app.
+          files: release/*.so

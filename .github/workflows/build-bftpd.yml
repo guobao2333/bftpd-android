@@ -8,7 +8,7 @@ on:
       - '.github/workflows/build-bftpd.yml'
   workflow_dispatch:
     inputs:
-      bftpd_BFTPD_USE_LATEST:
+      bftpd_use_latest:
         description: 'Download latest bftpd release (ignores bftpd_version)'
         type: boolean
         required: false
@@ -23,7 +23,7 @@ on:
         default: 'r26d'
 
 env:
-  BFTPD_BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_BFTPD_USE_LATEST || 'false' }}
+  BFTPD_BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_use_latest || 'false' }}
   BFTPD_VERSION: ${{ github.event.inputs.bftpd_version || '6.6' }}
   NDK_VERSION: ${{ github.event.inputs.ndk_version || 'r26d' }}
 

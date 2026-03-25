@@ -73,25 +73,25 @@ jobs:
             >> $GITHUB_ENV
 
       # ── bftpd source ──────────────────────────────────────────────────────
-    - name: Download bftpd (latest)
-      if: env.BFTPD_USE_LATEST == 'true'
-      run: |
-        # SourceForge best_release API
-        FILE_PATH=$(curl -s "https://sourceforge.net/projects/bftpd/best_release.json" \
-          | python3 -c "import sys,json; print(json.load(sys.stdin)['release']['filename'])")
-        # FILE_PATH like /bftpd/6.6/bftpd-6.6.tar.gz
-    
-        VERSION=$(echo "$FILE_PATH" | grep -oP '[\d]+\.[\d]+')
-        FILENAME=$(basename "$FILE_PATH")
-    
-        wget -q "https://downloads.sourceforge.net/project/bftpd${FILE_PATH}" \
-          -O "$FILENAME"
-    
-        tar xzf "$FILENAME"
-        rm "$FILENAME"
-    
-        echo "SRC_DIR=bftpd-${VERSION}" >> $GITHUB_ENV
-        echo "RESOLVED_VERSION=${VERSION}"  >> $GITHUB_ENV
+      - name: Download bftpd (latest)
+        if: env.BFTPD_USE_LATEST == 'true'
+        run: |
+          # SourceForge best_release API
+          FILE_PATH=$(curl -s "https://sourceforge.net/projects/bftpd/best_release.json" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['release']['filename'])")
+          # FILE_PATH like /bftpd/6.6/bftpd-6.6.tar.gz
+      
+          VERSION=$(echo "$FILE_PATH" | grep -oP '[\d]+\.[\d]+')
+          FILENAME=$(basename "$FILE_PATH")
+      
+          wget -q "https://downloads.sourceforge.net/project/bftpd${FILE_PATH}" \
+            -O "$FILENAME"
+      
+          tar xzf "$FILENAME"
+          rm "$FILENAME"
+      
+          echo "SRC_DIR=bftpd-${VERSION}" >> $GITHUB_ENV
+          echo "RESOLVED_VERSION=${VERSION}"  >> $GITHUB_ENV
 
       - name: Cache bftpd source (versioned)
         if: env.BFTPD_USE_LATEST != 'true'

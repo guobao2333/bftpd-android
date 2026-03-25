@@ -23,7 +23,7 @@ on:
         default: 'r26d'
 
 env:
-  BFTPD_BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_use_latest || 'true' }}
+  BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_use_latest || 'true' }}
   BFTPD_VERSION: ${{ github.event.inputs.bftpd_version || '6.6' }}
   NDK_VERSION: ${{ github.event.inputs.ndk_version || 'r26d' }}
 

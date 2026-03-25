@@ -80,16 +80,16 @@ jobs:
           FILE_PATH=$(curl -s "https://sourceforge.net/projects/bftpd/best_release.json" \
             | python3 -c "import sys,json; print(json.load(sys.stdin)['release']['filename'])")
           # FILE_PATH like /bftpd/6.6/bftpd-6.6.tar.gz
-      
+
           VERSION=$(echo "$FILE_PATH" | grep -oP 'bftpd-\K[\d.]+(?=\.tar\.gz)')
           FILENAME=$(basename "$FILE_PATH")
-      
+
           wget -q "https://downloads.sourceforge.net/project/bftpd${FILE_PATH}" \
             -O "$FILENAME"
-      
+
           tar xzf "$FILENAME"
           rm "$FILENAME"
-      
+
           echo "SRC_DIR=bftpd-${VERSION}" >> $GITHUB_ENV
           echo "RESOLVED_VERSION=${VERSION}"  >> $GITHUB_ENV
 
@@ -108,14 +108,11 @@ jobs:
           wget -q -L \
             https://sourceforge.net/projects/bftpd/files/bftpd/${{ env.BFTPD_VERSION }}/bftpd-${{ env.BFTPD_VERSION }}.tar.gz/download \
             -O bftpd-${{ env.BFTPD_VERSION }}.tar.gz
-          tar xzf bftpd-${{ env.BFTPD_VERSION }}.tar.gz
-          rm  bftpd-${{ env.BFTPD_VERSION }}.tar.gz
+          tar xzf "$FILENAME"
+          rm "$FILENAME"
 
-      - name: Set versioned source dir
-        if: env.BFTPD_USE_LATEST != 'true'
-        run: |
-          echo "SRC_DIR=bftpd-${{ env.BFTPD_VERSION }}" >> $GITHUB_ENV
-          echo "RESOLVED_VERSION=${{ env.BFTPD_VERSION }}" >> $GITHUB_ENV
+          echo "SRC_DIR=bftpd"                    >> $GITHUB_ENV
+          echo "RESOLVED_VERSION=${VERSION}"      >> $GITHUB_ENV
 
       # ── patch ─────────────────────────────────────────────────────────────
       - name: Apply patches

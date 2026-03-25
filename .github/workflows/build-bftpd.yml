@@ -8,14 +8,24 @@ on:
       - '.github/workflows/build-bftpd.yml'
   workflow_dispatch:
     inputs:
+      bftpd_BFTPD_USE_LATEST:
+        description: 'Download latest bftpd release (ignores bftpd_version)'
+        type: boolean
+        required: false
+        default: false
       bftpd_version:
-        description: 'bftpd version to build'
+        description: 'bftpd version (ignored when BFTPD_USE_LATEST=true)'
         required: false
         default: '6.6'
+      ndk_version:
+        description: 'ndk version'
+        required: false
+        default: 'r26d'
 
 env:
-  BFTPD_VERSION: ${{ github.event.inputs.bftpd_version }}
-  NDK_VERSION: 'r26d'
+  BFTPD_BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_BFTPD_USE_LATEST || 'false' }}
+  BFTPD_VERSION: ${{ github.event.inputs.bftpd_version || '6.6' }}
+  NDK_VERSION: ${{ github.event.inputs.ndk_version || 'r26d' }}
 
 jobs:
   build:
@@ -39,12 +49,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # ── NDK ─────────────────────────────────────────────────────────────
       - name: Cache NDK
         id: cache-ndk
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: android-ndk-${{ env.NDK_VERSION }}
           key: ndk-${{ env.NDK_VERSION }}
@@ -52,7 +62,7 @@ jobs:
       - name: Download NDK
         if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          wget -q \
+          wget -q -L \
             https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
           unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
           rm android-ndk-${{ env.NDK_VERSION }}-linux.zip
@@ -62,34 +72,65 @@ jobs:
           echo "TOOLCHAIN=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64" \
             >> $GITHUB_ENV
 
-      # ── bftpd source ─────────────────────────────────────────────────────
-      - name: Cache bftpd source
+      # ── bftpd source ──────────────────────────────────────────────────────
+      - name: Download bftpd (latest)
+        if: env.BFTPD_USE_LATEST == 'true'
+        run: |
+          # SourceForge latest/download redirects to the newest release tarball.
+          # -L follows the chain of redirects; -O writes to a fixed filename.
+          wget -q -L \
+            https://sourceforge.net/projects/bftpd/files/latest/download \
+            -O bftpd-latest.tar.gz
+
+          # Extract and find the resulting directory name, then normalise it.
+          tar xzf bftpd-latest.tar.gz
+          rm bftpd-latest.tar.gz
+
+          EXTRACTED=$(ls -d bftpd-* 2>/dev/null | head -1)
+          echo "Extracted: $EXTRACTED"
+          # Rename to a stable path so later steps don't need to know the version.
+          mv "$EXTRACTED" bftpd-src
+          echo "SRC_DIR=bftpd-src" >> $GITHUB_ENV
+
+          # Parse version from directory name for the release tag.
+          VERSION=${EXTRACTED#bftpd-}
+          echo "RESOLVED_VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Cache bftpd source (versioned)
+        if: env.BFTPD_USE_LATEST != 'true'
         id: cache-src
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bftpd-${{ env.BFTPD_VERSION }}
           key: bftpd-src-${{ env.BFTPD_VERSION }}
 
-      - name: Download bftpd source
-        if: steps.cache-src.outputs.cache-hit != 'true'
+      - name: Download bftpd (versioned)
+        if: env.BFTPD_USE_LATEST != 'true' && steps.cache-src.outputs.cache-hit != 'true'
         run: |
-          wget -q \
-            https://sourceforge.net/projects/bftpd/files/bftpd/${{ env.BFTPD_VERSION }}/bftpd-${{ env.BFTPD_VERSION }}.tar.gz
+          # Append /download to get the direct file link, not the SF landing page.
+          wget -q -L \
+            https://sourceforge.net/projects/bftpd/files/bftpd/${{ env.BFTPD_VERSION }}/bftpd-${{ env.BFTPD_VERSION }}.tar.gz/download \
+            -O bftpd-${{ env.BFTPD_VERSION }}.tar.gz
           tar xzf bftpd-${{ env.BFTPD_VERSION }}.tar.gz
           rm  bftpd-${{ env.BFTPD_VERSION }}.tar.gz
 
-      # ── patch ────────────────────────────────────────────────────────────
+      - name: Set versioned source dir
+        if: env.BFTPD_USE_LATEST != 'true'
+        run: |
+          echo "SRC_DIR=bftpd-${{ env.BFTPD_VERSION }}" >> $GITHUB_ENV
+          echo "RESOLVED_VERSION=${{ env.BFTPD_VERSION }}" >> $GITHUB_ENV
+
+      # ── patch ─────────────────────────────────────────────────────────────
       - name: Apply patches
         run: |
-          # Work on a fresh copy for each matrix job
-          cp -r bftpd-${{ env.BFTPD_VERSION }} build-${{ matrix.abi.name }}
+          cp -r ${{ env.SRC_DIR }} build-${{ matrix.abi.name }}
           cd build-${{ matrix.abi.name }}
           for p in $(ls $GITHUB_WORKSPACE/patches/*.patch | sort); do
             echo ">>> Applying: $(basename $p)"
             patch -p1 < "$p"
           done
 
-      # ── build ────────────────────────────────────────────────────────────
+      # ── build ──────────────────────────────────────────────────────────────
       - name: Build ${{ matrix.abi.name }}
         run: |
           TRIPLE=${{ matrix.abi.triple }}
@@ -101,9 +142,8 @@ jobs:
           make clean
           CROSS_CC=$CC make -j$(nproc)
 
-          # Verify it's a shared lib
           file libbftpd.so | grep -q "shared object" \
-            || { echo "ERROR: libbftpd.so is not a shared object"; exit 1; }
+            || { echo "ERROR: not a shared object"; exit 1; }
 
           # Strip debug symbols
           $STRIP --strip-unneeded libbftpd.so
@@ -118,13 +158,13 @@ jobs:
 
       # ── upload artifact ──────────────────────────────────────────────────
       - name: Upload ${{ matrix.abi.name }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: libbftpd-${{ matrix.abi.name }}
           path: out/${{ matrix.abi.name }}/libbftpd.so
           if-no-files-found: error
 
-  # ── collect all ABIs and publish release ──────────────────────────────────
+  # ── release ───────────────────────────────────────────────────────────────
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -132,7 +172,7 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: binaries/
           # downloads to binaries/libbftpd-<abi>/libbftpd.so
@@ -151,12 +191,13 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: bftpd-${{ env.BFTPD_VERSION }}-${{ github.sha }}
-          name: libbftpd.so ${{ env.BFTPD_VERSION }} (${{ github.sha }})
+          tag_name: bftpd-${{ env.RESOLVED_VERSION }}-${{ github.sha }}
+          name: libbftpd.so ${{ env.RESOLVED_VERSION }} (${{ github.sha }})
           body: |
-            Automatically built from bftpd ${{ env.BFTPD_VERSION }} with Android JNI patches.
+            Automatically built from bftpd ${{ env.RESOLVED_VERSION }} with Android JNI patches.
 
             ## Usage
-            Put each `.so` into the corresponding `app/src/main/jniLibs/<abi>/libbftpd.so`
-            then call `System.loadLibrary("bftpd")` from your app.
+            Drop each `.so` into `app/src/main/jniLibs/<abi>/libbftpd.so`,
+            then call `System.loadLibrary("bftpd")` from your app,
+            or load via `dlopen()` — the server starts automatically on load.
           files: release/*.so

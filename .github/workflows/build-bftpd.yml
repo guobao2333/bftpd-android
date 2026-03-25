@@ -81,7 +81,7 @@ jobs:
             | python3 -c "import sys,json; print(json.load(sys.stdin)['release']['filename'])")
           # FILE_PATH like /bftpd/6.6/bftpd-6.6.tar.gz
       
-          VERSION=$(echo "$FILE_PATH" | grep -oP '[\d]+\.[\d]+')
+          VERSION=$(echo "$FILE_PATH" | grep -oP 'bftpd-\K[\d.]+(?=\.tar\.gz)')
           FILENAME=$(basename "$FILE_PATH")
       
           wget -q "https://downloads.sourceforge.net/project/bftpd${FILE_PATH}" \

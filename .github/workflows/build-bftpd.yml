@@ -9,16 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       bftpd_use_latest:
-        description: 'Download latest bftpd release (ignores bftpd_version)'
+        description: 'Download latest bftpd release (ignores bftpd version)'
         type: boolean
         required: false
         default: true
+
       bftpd_version:
-        description: 'bftpd version (ignored when BFTPD_USE_LATEST=true)'
+        description: 'bftpd version'
         required: false
-        default: '6.6'
+
       ndk_version:
-        description: 'ndk version'
+        description: 'NDK version'
         required: false
         default: 'r26d'
 
@@ -73,46 +74,41 @@ jobs:
             >> $GITHUB_ENV
 
       # ── bftpd source ──────────────────────────────────────────────────────
-      - name: Download bftpd (latest)
-        if: env.BFTPD_USE_LATEST == 'true'
+      - name: Resolve bftpd version
         run: |
-          # SourceForge best_release API
-          FILE_PATH=$(curl -s "https://sourceforge.net/projects/bftpd/best_release.json" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['release']['filename'])")
-          # FILE_PATH like /bftpd/6.6/bftpd-6.6.tar.gz
+          if [ "$BFTPD_USE_LATEST" = "true" ]; then
+            FILE_PATH=$(curl -s "https://sourceforge.net/projects/bftpd/best_release.json" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin)['release']['filename'])")
+            VERSION=$(echo "$FILE_PATH" | grep -oP 'bftpd-\K[\d.]+(?=\.tar\.gz)')
+            TARBALL=$(basename "$FILE_PATH")
+            URL="https://downloads.sourceforge.net/project/bftpd${FILE_PATH}"
+            SRC_DIR=bftpd
+          else
+            VERSION=$BFTPD_VERSION
+            TARBALL="bftpd-${VERSION}.tar.gz"
+            URL="https://sourceforge.net/projects/bftpd/files/bftpd/${VERSION}/${TARBALL}/download"
+            SRC_DIR="bftpd-${VERSION}"
+          fi
+          echo "RESOLVED_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "TARBALL=${TARBALL}"           >> $GITHUB_ENV
+          echo "DOWNLOAD_URL=${URL}"          >> $GITHUB_ENV
+          echo "SRC_DIR=${SRC_DIR}"           >> $GITHUB_ENV
 
-          VERSION=$(echo "$FILE_PATH" | grep -oP 'bftpd-\K[\d.]+(?=\.tar\.gz)')
-          FILENAME=$(basename "$FILE_PATH")
-
-          wget -q "https://downloads.sourceforge.net/project/bftpd${FILE_PATH}" \
-            -O "$FILENAME"
-
-          tar xzf "$FILENAME"
-          rm "$FILENAME"
-
-          echo "SRC_DIR=bftpd-${VERSION}" >> $GITHUB_ENV
-          echo "RESOLVED_VERSION=${VERSION}"  >> $GITHUB_ENV
-
-      - name: Cache bftpd source (versioned)
-        if: env.BFTPD_USE_LATEST != 'true'
+      # ── cache ─────────────────────────────────────────────────────────────
+      - name: Cache bftpd source
         id: cache-src
         uses: actions/cache@v5
         with:
-          path: bftpd-${{ env.BFTPD_VERSION }}
-          key: bftpd-src-${{ env.BFTPD_VERSION }}
+          path: ${{ env.SRC_DIR }}
+          key: bftpd-src-${{ env.RESOLVED_VERSION }}
 
-      - name: Download bftpd (versioned)
-        if: env.BFTPD_USE_LATEST != 'true' && steps.cache-src.outputs.cache-hit != 'true'
+      # ── download ──────────────────────────────────────────────────────────
+      - name: Download bftpd
+        if: steps.cache-src.outputs.cache-hit != 'true'
         run: |
-          # Append /download to get the direct file link, not the SF landing page.
-          wget -q -L \
-            https://sourceforge.net/projects/bftpd/files/bftpd/${{ env.BFTPD_VERSION }}/bftpd-${{ env.BFTPD_VERSION }}.tar.gz/download \
-            -O bftpd-${{ env.BFTPD_VERSION }}.tar.gz
-          tar xzf "$FILENAME"
-          rm "$FILENAME"
-
-          echo "SRC_DIR=bftpd"                    >> $GITHUB_ENV
-          echo "RESOLVED_VERSION=${VERSION}"      >> $GITHUB_ENV
+          wget -q -L "${{ env.DOWNLOAD_URL }}" -O "${{ env.TARBALL }}"
+          tar xzf "${{ env.TARBALL }}"
+          rm "${{ env.TARBALL }}"
 
       # ── patch ─────────────────────────────────────────────────────────────
       - name: Apply patches

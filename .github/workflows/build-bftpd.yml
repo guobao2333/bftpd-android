@@ -1,4 +1,4 @@
-name: Build libbftpd.so for Android
+name: Build bftpd for Android
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
         description: 'Download latest bftpd release (ignores bftpd_version)'
         type: boolean
         required: false
-        default: false
+        default: true
       bftpd_version:
         description: 'bftpd version (ignored when BFTPD_USE_LATEST=true)'
         required: false
@@ -23,7 +23,7 @@ on:
         default: 'r26d'
 
 env:
-  BFTPD_BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_use_latest || 'false' }}
+  BFTPD_BFTPD_USE_LATEST: ${{ github.event.inputs.bftpd_use_latest || 'true' }}
   BFTPD_VERSION: ${{ github.event.inputs.bftpd_version || '6.6' }}
   NDK_VERSION: ${{ github.event.inputs.ndk_version || 'r26d' }}
 
